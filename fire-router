@@ -1,0 +1,329 @@
+#!/bin/bash
+echo "Start NetFilter Setting....";
+
+#----------------#
+# 各種変数の設定 #
+#----------------#
+set_variables() {
+	DATE_FILE="/etc/iptables/delegated-apnic-latest_date"
+	DAL_FILE="/etc/iptables/delegated-apnic-latest"
+	LOGFILE="/var/log/iptables.log"
+	DENY_IP_LIST_FILE="/etc/iptables/denyIpList.txt"
+	DATE_REMOTE=`wget -S --spider http://ftp.apnic.net/stats/apnic/delegated-apnic-latest 2>&1 | grep Last-Modified`
+	DO_WGET=1
+
+	LAN_IF=eth0
+	WAN_IF=ppp0
+	LAN_NET=192.168.62.0/24
+	VPN_NET=10.8.0.0/24
+
+	DESKTOP_IP=192.168.62.2
+	PlayStation3=192.168.62.7
+}
+
+echoMsg() {
+	echo `date +"%R %F"`" "$1 >> ${LOGFILE}
+}
+
+update_dalfile() {
+	echo -n "check dal_file..."
+	if [ -e "${DAL_FILE}" ];
+	then
+		echo "exist"
+		echo -n "check date_file..."
+		if [ -e "${DATE_FILE}" ];
+		then
+			echo "exist"
+			DATE_LOCAL=`cat ${DATE_FILE}`
+			echo -n "check update..."
+			echo `date +"%R %F"`
+			echo "remote:${DATE_REMOTE}"
+			echo "local :${DATE_LOCAL}"
+			if [ "${DATE_REMOTE}" != "${DATE_LOCAL}" ];
+			then
+				echo "update"
+			else
+				echo "not update"
+				DO_WGET=0
+			fi
+		else
+			echo "not exist"
+		fi
+	else
+		echo "not exist"
+	fi
+	
+	if [ ${DO_WGET} = 1 ];
+	then
+		echo "${DATE_REMOTE}" > "${DATE_FILE}"
+		echoMsg "Wget"
+		wget -O "${DAL_FILE}" http://ftp.apnic.net/stats/apnic/delegated-apnic-latest
+	else
+		echoMsg "Not Wget"
+	fi
+}
+
+drop_foreign() {
+	#拒否する国からのパケット
+	/sbin/iptables -N drop-cntry
+	/sbin/iptables -A drop-cntry -j LOG --log-level debug --log-prefix '[IPTABLES CONTRY DROP] '
+	/sbin/iptables -A drop-cntry -j DROP
+
+	ADDRESSES=(`cat "${DAL_FILE}" | grep '^apnic|CN|ipv4\|^apnic|KR|ipv4\|^apnic|TW|ipv4\|^apnic|HK|ipv4\|^apnic|KP|ipv4' | awk '
+	BEGIN {
+		FS = "|";
+		OFMT = "%d"; 
+		for (i = 0; i < 32; i++) 
+		{
+			pow[32 - i] = 2 ^ i;
+		} 
+	}
+	{
+		for (j in pow)
+		{
+			if ($5 == pow[j]) print $4 "/" j;
+		} 
+	}
+	'`);
+	i=1;
+	echo "Setting drop Packet....";
+	for ADDRESS in ${ADDRESSES[@]}; do
+		/sbin/iptables -A INPUT -i ${WAN_IF} -s ${ADDRESS} -j drop-cntry
+		echo -e " ${i} / ${#ADDRESSES[*]}\r\c ";
+		i=`expr ${i} + 1`;
+	done
+	echo "";
+	echo "Setting SSH ACCEPT Packet....";
+	ADDRESSES=(`cat "${DAL_FILE}" | grep '^apnic|JP|ipv4' | awk '
+	BEGIN {
+		FS = "|";
+		OFMT = "%d";
+		for(i = 0; i < 32; i++)
+		{
+			pow[32 - i] = 2 ^ i;
+		}
+	}
+	{
+		for (j in pow)
+		{
+			if ($5 == pow[j]) print $4 "/" j;
+		}
+	}
+	'`);
+	i=1;
+	for ADDRESS in ${ADDRESSES[@]} ; do
+		/sbin/iptables -A INPUT -p tcp --syn -s ${ADDRESS} -m state --state NEW --dport 22 -m limit --limit 3/m --limit-burst 3 -j ACCEPT
+		echo -e " ${i} / ${#ADDRESSES[*]}\r\c ";
+		i=`expr ${i} + 1`;
+	done
+	/sbin/iptables -A INPUT -p tcp --syn -m state --state NEW --dport 22 -j DROP
+
+	/sbin/iptables -N drop-host
+	/sbin/iptables -A drop-host -j LOG --log-level debug --log-prefix '[IPTABLES HOST DROP] '
+	/sbin/iptables -A drop-host -j DROP
+	ADDRESSES=(`cat ${DENY_IP_LIST_FILE}`);
+	for ADDRESS in ${ADDRESSES[@]} ; do
+		/sbin/iptables -A INPUT -i ${WAN_IF} -s ${ADDRESS} -j drop-host
+	done
+}
+
+
+#--------------#
+# 設定の初期化 #
+#--------------#
+init_setting() {
+	/sbin/iptables -t filter -F
+	/sbin/iptables -t filter -X
+	/sbin/iptables -t filter -Z
+	/sbin/iptables -t nat -F
+	/sbin/iptables -t nat -X
+	/sbin/iptables -t nat -Z
+	/sbin/iptables -t mangle -F
+	/sbin/iptables -t mangle -X
+	/sbin/iptables -t mangle -Z
+}
+
+
+set_kernel_flags() {
+	#-----------------------#
+	# TCP SYN Flood攻撃対策 #
+	#-----------------------#
+	echo 1 > /proc/sys/net/ipv4/tcp_syncookies
+	
+	#------------------------------------------------------------#
+	# Smurf攻撃対策                                              #
+	# 送信元を偽装したブロードキャスト宛のpingによる攻撃への対策 #
+	#------------------------------------------------------------#
+	echo 1 > /proc/sys/net/ipv4/icmp_echo_ignore_broadcasts
+	
+	#-----------------------------#
+	# ICMP Redirectパケットを破棄 #
+	#-----------------------------#
+	echo 0 > /proc/sys/net/ipv4/conf/all/accept_redirects
+	
+	#-----------------------------#
+	# Source-routedパケットの破棄 #
+	#-----------------------------#
+	echo 0 > /proc/sys/net/ipv4/conf/all/accept_source_route
+	
+	#---------------------#
+	# IP Spoofing攻撃対策 #
+	#---------------------#
+	echo 1 > /proc/sys/net/ipv4/conf/all/rp_filter
+	
+	#----------------------------#
+	# パケットの転送を有効にする #
+	#----------------------------#
+	echo 1 > /proc/sys/net/ipv4/ip_forward
+}
+
+
+#--------------------------#
+# デフォルトポリシーを設定 #
+#--------------------------#
+set_default_policy() {
+	/sbin/iptables -P INPUT   DROP
+	/sbin/iptables -P FORWARD ACCEPT
+	/sbin/iptables -P OUTPUT  ACCEPT
+}
+
+create_chains() {
+	/sbin/iptables -N fragment
+	/sbin/iptables -A fragment -j LOG --log-level debug --log-prefix '[IPTABLES fragment DROP] '
+	/sbin/iptables -A fragment -j DROP
+
+	/sbin/iptables -N net-bios
+	/sbin/iptables -A net-bios -j LOG --log-level debug --log-prefix '[IPTABLES NetBIOS DROP] '
+	/sbin/iptables -A net-bios -j DROP
+}
+
+#------------#
+# PREROUTING #
+#------------#
+set_prerouting() {
+	echo "PREROUTING Setting....";
+	/sbin/iptables -t nat -A PREROUTING -i ${WAN_IF} -p tcp --dport 15306 -j DNAT --to-destination ${DESKTOP_IP}:15306
+	/sbin/iptables -t nat -A PREROUTING -i ${WAN_IF} -p tcp --dport 15306 -j DNAT --to-destination ${DESKTOP_IP}:53820
+	#/sbin/iptables -t nat -A PREROUTING -i ${WAN_IF} -p tcp --dport 14723 -j DNAT --to-destination ${DESKTOP_IP}:14723
+	/sbin/iptables -t nat -A PREROUTING -i ${WAN_IF} -p tcp --dport 3389 -j DNAT --to-destination ${DESKTOP_IP}:3389
+	#/sbin/iptables -t nat -A PREROUTING -i ${WAN_IF} -p tcp --dport 9293 -j DNAT --to-destination ${PlayStation3}:9293
+}
+
+#-------#
+# INPUT #
+#-------#
+set_input() {
+	echo "INPUT Setting....";
+	/sbin/iptables -A INPUT -i ${WAN_IF} -s 10.0.0.0/8 -j DROP
+	/sbin/iptables -A INPUT -i ${WAN_IF} -s 172.16.0.0/12 -j DROP
+	/sbin/iptables -A INPUT -i ${WAN_IF} -s 192.168.0.0/16 -j DROP
+	/sbin/iptables -A INPUT -f -j fragment
+	/sbin/iptables -A INPUT -p icmp -j ACCEPT
+	/sbin/iptables -A INPUT -i lo -j ACCEPT
+	/sbin/iptables -A INPUT -s localhost -j ACCEPT
+
+	/sbin/iptables -A INPUT -s ${VPN_NET} -j ACCEPT #From VPN
+	/sbin/iptables -A INPUT -i ${LAN_IF} -j ACCEPT
+	/sbin/iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+}
+
+
+#-------------------#
+# Setting of Server #
+#-------------------#
+set_server() {
+	echo "Server Setting....";
+	modprobe ip_nat_ftp
+
+	drop_foreign
+	#FTP
+	/sbin/iptables -A INPUT -p tcp --dport 20 -j ACCEPT
+	#FTP
+	/sbin/iptables -A INPUT -p tcp --dport 21 -j ACCEPT
+	#HTTP
+	/sbin/iptables -A INPUT -p tcp --dport 80 -j ACCEPT
+	#HTTPS
+	/sbin/iptables -A INPUT -p tcp --dport 443 -j ACCEPT
+	#VPN
+	/sbin/iptables -A INPUT -p udp --dport 7419 -j ACCEPT #To VPN
+	#/sbin/iptables -A INPUT -p tcp --dport 8090 -j ACCEPT
+	#/sbin/iptables -A INPUT -p tcp --dport 51413 -j ACCEPT
+}
+
+#---------#
+# FORWARD #
+#---------#
+set_forward() {
+	echo "FORWARD Setting....";
+	/sbin/iptables -A FORWARD -p tcp -m multiport --dports 135,137,138,139,445 -j net-bios
+	/sbin/iptables -A FORWARD -p udp -m multiport --dports 135,137,138,139,445 -j net-bios
+	/sbin/iptables -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+}
+
+#--------#
+# OUTPUT #
+#--------#
+set_output() {
+	echo "OUTPUT Setting....";
+	/sbin/iptables -A OUTPUT -o ${WAN_IF} -p tcp -m multiport --dports 135,137,138,139,445 -j net-bios
+	/sbin/iptables -A OUTPUT -o ${WAN_IF} -p udp -m multiport --dports 135,137,138,139,445 -j net-bios
+}
+
+#-------------#
+# POSTROUTING #
+#-------------#
+set_postrouting() {
+	echo "POSTROUTING Setting....";
+	#/sbin/iptables -t nat -A POSTROUTING -o ${WAN_IF} -s ${LAN_NET} -p ! icmp -j MASQUERADE --to-ports 60000-65535
+	#/sbin/iptables -t nat -A POSTROUTING -o ${WAN_IF} -s ${LAN_NET} -p icmp -j MASQUERADE
+	/sbin/iptables -t nat -A POSTROUTING -o ${WAN_IF} -s ${LAN_NET} -j MASQUERADE
+	/sbin/iptables -t nat -A POSTROUTING -s ${VPN_NET} -o ${LAN_IF} -j MASQUERADE
+}
+
+#--------------------------------------------#
+# 設定ルール外のパケットはログを記録して破棄 #
+#--------------------------------------------#
+set_other() {
+	#/sbin/iptables -A INPUT -j ACCEPT
+	/sbin/iptables -A INPUT -j LOG --log-level debug --log-prefix '[IPTABLES INPUT DROP] '
+}
+
+update() {
+	echoMsg "Update"
+	init_setting
+	set_kernel_flags
+	set_default_policy
+	create_chains
+	
+	set_postrouting
+	set_prerouting
+	set_forward
+	set_output
+	set_input
+	set_server
+	set_other
+}
+
+
+set_variables
+update_dalfile
+
+# 引数が1で(すでにNetFilterの設定がされていて)
+# IP割り当て状況が更新されていなかったら
+# NetFilterの設定を更新しない
+if [ $# = 1 ];
+then
+	echoMsg "From Cron";
+	if [ ${DO_WGET} = 0 ];
+	then
+		echo "Not Update NetFilter Setting...."
+		echoMsg "Not Update"
+	else
+		update
+	fi
+else
+	echoMsg "From rc.local";
+	update
+fi
+
+exit 0
