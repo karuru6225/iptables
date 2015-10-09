@@ -116,13 +116,16 @@ drop_foreign() {
 	done
 	/sbin/iptables -A INPUT -p tcp --syn -m state --state NEW --dport 22 -j DROP
 
-	/sbin/iptables -N drop-host
-	/sbin/iptables -A drop-host -j LOG --log-level debug --log-prefix '[IPTABLES HOST DROP] '
-	/sbin/iptables -A drop-host -j DROP
-	ADDRESSES=(`cat ${DENY_IP_LIST_FILE}`);
-	for ADDRESS in ${ADDRESSES[@]} ; do
-		/sbin/iptables -A INPUT -s ${ADDRESS} -j drop-host
-	done
+	if [ -e "${DENY_IP_LIST_FILE}" ];
+	then
+		/sbin/iptables -N drop-host
+		/sbin/iptables -A drop-host -j LOG --log-level debug --log-prefix '[IPTABLES HOST DROP] '
+		/sbin/iptables -A drop-host -j DROP
+		ADDRESSES=(`cat ${DENY_IP_LIST_FILE}`);
+		for ADDRESS in ${ADDRESSES[@]} ; do
+			/sbin/iptables -A INPUT -s ${ADDRESS} -j drop-host
+		done
+	fi
 }
 
 
