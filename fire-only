@@ -14,9 +14,6 @@ set_variables() {
 
 	LAN_IF=eth0
 	LAN_NET=192.168.62.0/24
-	VPN_NET=10.8.0.0/24
-
-	DESKTOP_IP=192.168.62.2
 }
 
 echoMsg() {
@@ -204,7 +201,6 @@ set_input() {
 	/sbin/iptables -A INPUT -i lo -j ACCEPT
 	/sbin/iptables -A INPUT -s localhost -j ACCEPT
 
-	/sbin/iptables -A INPUT -s ${VPN_NET} -j ACCEPT #From VPN
 	/sbin/iptables -A INPUT -s ${LAN_NET} -j ACCEPT
 	/sbin/iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 }
@@ -242,8 +238,8 @@ set_server() {
 # POSTROUTING #
 #-------------#
 set_postrouting() {
-	echo "POSTROUTING Setting....";
-	/sbin/iptables -t nat -A POSTROUTING -s ${VPN_NET} -o ${LAN_IF} -j MASQUERADE
+	#echo "POSTROUTING Setting....";
+	#/sbin/iptables -t nat -A POSTROUTING -s ${VPN_NET} -o ${LAN_IF} -j MASQUERADE
 }
 
 #--------------------------------------------#
